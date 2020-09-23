@@ -1,0 +1,160 @@
+/**
+ * @connection_manager
+ * @author  Charan Reddy BOdennagari <charanre@buffalo.edu>
+ * @version 1.0
+ *
+ * @section LICENSE
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of
+ * the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details at
+ * http://www.gnu.org/copyleft/gpl.html
+ *
+ * @section DESCRIPTION
+ *
+ * Connection Manager listens for incoming connections/messages from the
+ * controller and other routers and calls the desginated handlers.
+ */
+
+#include <sys/select.h>
+#include <sys/time.h>
+#include "../include/connection_manager.h"
+#include "../include/global.h"
+#include "../include/control_handler.h"
+#include "../include/file_transfer.h"
+
+fd_set master_list, watch_list;
+int head_fd;
+struct timeval currtime,senttime;
+
+void main_loop()
+{
+    int selret, sock_index, fdaccept;
+
+    timeout.tv_sec = update_interval;
+    timeout.tv_usec = 0;
+    int i = 0;
+    while(TRUE){
+	cout<<"loop "<<++i<<endl;
+        watch_list = master_list;
+	//timeout.tv_sec = update_interval;
+	//timeout.tv_usec = 0;
+	if(timeout.tv_sec<1)
+		timeout.tv_sec = 0;
+//	gettimeofday(&senttime,NULL);
+        selret = select(head_fd+1, &watch_list, NULL, NULL, &timeout);
+	cout<<"Select returned "<<selret<<" timeout "<<timeout.tv_sec<<" "<<timeout.tv_usec<<endl;
+
+        if(selret < 0)
+            ERROR("select failed.");
+
+        /* Loop through file descriptors to check which ones are ready */
+        for(sock_index=0; sock_index<=head_fd; sock_index+=1){
+	    if(selret==0){
+		send_routing_update();
+		timeout.tv_sec = update_interval;
+		timeout.tv_usec = 0;
+		gettimeofday(&senttime,NULL);
+		gettimeofday(&currtime,NULL);
+		cout<<"loop "<<i<<" ru sent in main, timeout "<<timeout.tv_sec<<" "<<timeout.tv_usec<<" current "<<currtime.tv_sec<<" "<<currtime.tv_usec<<endl;
+		break;
+	    }
+            if(FD_ISSET(sock_index, &watch_list)){
+		cout<<"loop "<<i<<" inside select activity occured for "<<sock_index<<endl;
+		gettimeofday(&currtime,NULL);
+		cout<<"loop "<<i<<" before control sock timeout "<<timeout.tv_sec<<" start "<<senttime.tv_sec<<" "<<senttime.tv_usec<<" current "<<currtime.tv_sec<<" "<<currtime.tv_usec<<endl;
+                /* control_socket */
+                if(sock_index == control_socket){
+		    cout<<"activity on control socket "<<control_socket<<endl;
+                    fdaccept = new_control_conn(sock_index);
+
+                    /* Add to watched socket list */
+                    FD_SET(fdaccept, &master_list);
+                    if(fdaccept > head_fd) head_fd = fdaccept;
+		cout<<"control csocket added to master_list "<<fdaccept<<endl;
+		    //timeout.tv_sec = update_interval;
+		    //gettimeofday(&senttime,NULL);
+			
+                }
+
+                /* router_socket */
+                else if(sock_index == router_socket){
+                    //call handler that will call recvfrom() .....
+			cout<<"loop "<<i<<" called routing update in mainloop activity on router_socket"<<endl;
+			gettimeofday(&currtime,NULL);
+		    	timeout.tv_sec = update_interval-(currtime.tv_sec-senttime.tv_sec);
+			cout<<"loop "<<i<<" if router socket timeout "<<timeout.tv_sec<<" "<<timeout.tv_usec<<" start "<<senttime.tv_sec<<" "<<senttime.tv_usec<<" current "<<currtime.tv_sec<<" "<<currtime.tv_usec<<endl;
+			recv_routing_update(sock_index);
+                }
+
+                /* data_socket */
+                else if(sock_index == data_socket){
+                    //new_data_conn(sock_index);
+                    cout<<"activity on data socket "<<data_socket<<endl;
+                    fdaccept = new_data_conn(sock_index);
+
+                    /* Add to watched socket list */
+                    FD_SET(fdaccept, &master_list);
+                    if(fdaccept > head_fd) head_fd = fdaccept;
+		    	gettimeofday(&currtime,NULL);
+		    	timeout.tv_sec = update_interval-(currtime.tv_sec-senttime.tv_sec);
+			cout<<"loop "<<i<<" if data socket timeout "<<timeout.tv_sec<<" "<<timeout.tv_usec<<" start "<<senttime.tv_sec<<" "<<senttime.tv_usec<<" current "<<currtime.tv_sec<<" "<<currtime.tv_usec<<endl;
+                }
+
+                /* Existing connection */
+                else{
+		    gettimeofday(&currtime,NULL);
+		    timeout.tv_sec = update_interval-(currtime.tv_sec-senttime.tv_sec);
+		    cout<<"loop "<<i<<" activity is on existing sock in main loop"<<sock_index<<" curtime "<<currtime.tv_sec<<" "<<currtime.tv_usec<<endl;
+		    gettimeofday(&timeout,NULL);
+                    if(isControl(sock_index)){
+                        if(!control_recv_hook(sock_index)) FD_CLR(sock_index, &master_list);
+		    	gettimeofday(&currtime,NULL);
+			cout<<currtime.tv_sec<<" "<<currtime.tv_usec<<" "<<senttime.tv_sec<<" "<<senttime.tv_usec<<endl;
+			if(currtime.tv_usec > senttime.tv_usec){
+				timeout.tv_sec = update_interval-(currtime.tv_sec-senttime.tv_sec)-1;
+				timeout.tv_usec = 1000000-(senttime.tv_usec+(1000000-currtime.tv_usec));}
+			else{
+				timeout.tv_sec = update_interval-(currtime.tv_sec-senttime.tv_sec);
+				timeout.tv_usec = 1000000-(currtime.tv_usec-senttime.tv_usec);}
+		    		gettimeofday(&currtime,NULL);
+		    cout<<"loop "<<i<<" curtime "<<currtime.tv_sec<<" "<<currtime.tv_usec<<endl;
+                    }
+                    else if(isData(sock_index)){
+                        if(!receive_data(sock_index)) FD_CLR(sock_index, &master_list);
+                    }
+		    /*else if(sock_index == router_socket){
+			cout<<"called routing update in main loop"<<endl;
+			recv_routing_update(sock_index);
+		    }*/
+                    //else if isData(sock_index);
+                    else ERROR("Unknown socket index");
+		    cout<<"timeout in main "<<timeout.tv_sec<<" "<<timeout.tv_usec<<endl;
+                }
+            }
+        }
+    }
+}
+
+void init()
+{
+    control_socket = create_control_sock();
+
+    //router_socket and data_socket will be initialized after INIT from controller
+    cout<<"Entered init module"<<endl;
+
+    FD_ZERO(&master_list);
+    FD_ZERO(&watch_list);
+
+    /* Register the control socket */
+    FD_SET(control_socket, &master_list);
+    head_fd = control_socket;
+
+    main_loop();
+}
